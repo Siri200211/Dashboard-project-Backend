@@ -1,0 +1,20 @@
+Plugins for the app Feature	Plugin/Library
+Email Notifications	nodemailer, nodemailer-smtp-transport
+CSV Export	csv-writer, json2csv, react-csv
+CSV Import	csv-parser, multer
+Dynamic Data Filtering	lodash, mongoose-aggregate-paginate-v2
+Charts and Analytics	recharts, chart.js
+Role-Based Access Control	jsonwebtoken, bcrypt, express-jwt
+Responsive Design	Material-UI, Bootstrap, Tailwind
+APIs Integration	axios, swagger-ui-express
+Secure Authentication	bcrypt, helmet, express-rate-limit
+Scalability	PM2, Redis
+
+
+1. first go to the BACKEND file and run "npm install"(this will install all the plugins) 
+2. and then run "npm run dev" (to start backend)
+3. if there any missing plugins manualy run the missing plaugins ( ex- npm install <missing-plugin>)
+
+4. and then go the the frontend file and then again run "npm install"(this will install all the plugins) 
+5. then run "npm start" (to start frontend)
+6. if there any missing plugins manualy run the missing plaugins ( ex- npm install <missing-plugin>)

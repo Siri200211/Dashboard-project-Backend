@@ -1,0 +1,12 @@
+Plugins for the app Feature	Plugin/Library
+Email Notifications	nodemailer, nodemailer-smtp-transport
+CSV Export	csv-writer, json2csv, react-csv
+CSV Import	csv-parser, multer
+Dynamic Data Filtering	lodash, mongoose-aggregate-paginate-v2
+Charts and Analytics	recharts, chart.js
+Role-Based Access Control	jsonwebtoken, bcrypt, express-jwt
+Responsive Design	Material-UI, Bootstrap, Tailwind
+APIs Integration	axios, swagger-ui-express
+Secure Authentication	bcrypt, helmet, express-rate-limit
+Scalability	PM2, Redis
+
