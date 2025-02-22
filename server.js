@@ -2,6 +2,7 @@ const express = require("express");
 const mongoose = require("mongoose");
 const csvParser = require("csv-parser");
 const cors = require("cors");
+const path = require('path');
 const bodyParser = require("body-parser");
 const moment = require("moment"); // Import moment.js for date parsing
 const multer = require("multer"); // Import multer for handling file uploads
@@ -760,6 +761,74 @@ if (deleted_method) {
 
   return results[0] || {};
 };
+app.get("/get-counts-by-category-and-rto", async (req, res) => {
+  const { year, month, day } = req.query;
+
+  // Initial match stage with fixed category filter
+  const matchStage = {
+    category: "PEO DP BB Up_30K", // Fixed category filter
+  };
+
+  // Add filters based on provided query parameters
+  if (year) {
+    matchStage["$expr"] = { $eq: [{ $year: "$date" }, Number(year)] };
+  }
+
+  const pipeline = [
+    { $match: matchStage }, // Apply category and date filters
+    {
+      $project: {
+        rto_split: 1,
+        category: 1,
+        year: { $year: "$date" },
+        month: { $month: "$date" },
+        day: { $dayOfMonth: "$date" },
+      },
+    },
+  ];
+
+  // Apply the month filter
+  if (month && month !== "all") {
+    pipeline.push({
+      $match: {
+        month: Number(month),
+      },
+    });
+  }
+
+  // Apply the day filter
+  if (day && day !== "all") {
+    pipeline.push({
+      $match: {
+        day: Number(day),
+      },
+    });
+  }
+
+  // Group by rto_split, year, month, day
+  pipeline.push(
+    {
+      $group: {
+        _id: {
+          rto_split: "$rto_split",
+          year: "$year",
+          month: "$month",
+          day: "$day",
+        },
+        count: { $sum: 1 },
+      },
+    },
+    { $sort: { "_id.year": 1, "_id.month": 1, "_id.day": 1 } } // Sort by year, month, day
+  );
+
+  try {
+    const counts = await Order.aggregate(pipeline); // Run aggregation pipeline
+    res.json(counts); // Return the aggregated counts
+  } catch (err) {
+    console.error("Error fetching counts:", err);
+    res.status(500).send("Error fetching counts");
+  }
+});
 // =============================================================
 //  ROUTE TO FETCH THE CATEGORIZED COUNTS WITH ALL FILTERS
 // =============================================================
@@ -1008,6 +1077,18 @@ app.get("/test-email", async (req, res) => {
   }
 });
 module.exports = { sendEmail };
+// Serve static files from the React app
+app.use(express.static(path.join(__dirname, 'dashboard-app/build')));
+
+// Handle API routes
+app.get('/api/data', (req, res) => {
+  res.json({ message: 'Hello from the backend!' });
+});
+
+// Catch all other routes and return the React app
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, 'dashboard-app/build', 'index.html'));
+});
 // Start the server
 const PORT = process.env.PORT || 8070;
 app.listen(PORT, () => {
