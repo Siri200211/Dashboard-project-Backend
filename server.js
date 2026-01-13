@@ -15,7 +15,7 @@ const app = express();
 
 // Middleware for CORS and JSON body parsing
 app.use(cors());
-app.use(bodyParser.json()); // JSON parser (added body-parser before routes)
+app.use(bodyParser.json()); // JSON parser (added body-parser before routes) 
 app.use(bodyParser.urlencoded({ extended: true }));
 const authRoutes = require("./routes/authRoutes"); // Adjust if path differs
 // Routes
@@ -26,10 +26,18 @@ app.use(bodyParser.json({ limit: "350mb" }));
 app.use(bodyParser.urlencoded({ limit: "350mb", extended: true }));
 
 // Setup multer to handle file uploads
-const storage = multer.memoryStorage(); // Store the file in memory
+const storage = multer.memoryStorage();
 const upload = multer({
   storage: storage,
   limits: { fileSize: 350 * 1024 * 1024 }, // 350MB max file size
+  fileFilter: (req, file, cb) => {
+    const allowedMimeTypes = ['text/csv', 'application/vnd.ms-excel'];
+    if (allowedMimeTypes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only CSV files are allowed.'), false);
+    }
+  }
 }); // Create the multer upload instance
 
 // MongoDB connection
@@ -88,11 +96,14 @@ app.post(
       "Order Line Oss Service Type",
     ];
 
-    const replaceData = req.query.replaceData === "true"; // Flag to choose mode
-
     if (!req.file) {
       return res.status(400).send("No file uploaded");
     }
+
+    const replaceData = req.query.replaceData === "true"; // Flag to choose mode
+    const deleteYear = parseInt(req.query.deleteYear, 10);
+    const deleteMonth = parseInt(req.query.deleteMonth, 10); // 0-based (0 = Jan, 11 = Dec)
+    const deleteDay = req.query.deleteDay ? parseInt(req.query.deleteDay, 10) : null;
 
     const results = [];
     const headersValidated = new Set();
@@ -102,86 +113,104 @@ app.post(
     const readableStream = require("stream").Readable.from(csvData);
 
     readableStream
-  .pipe(csvParser())
-  .on("headers", (headers) => {
-    // Normalize headers: Remove spaces and make lowercase
-    const normalizedHeaders = headers.map((header) =>
-      header.trim().replace(/\s+/g, "_").toLowerCase()
-    );
-    const normalizedRequiredHeaders = requiredHeaders.map((header) =>
-      header.trim().replace(/\s+/g, "_").toLowerCase()
-    );
+      .pipe(csvParser())
+      .on("headers", (headers) => {
+        // Normalize headers: Remove spaces and make lowercase
+        const normalizedHeaders = headers.map((header) =>
+          header.trim().replace(/\s+/g, "_").toLowerCase()
+        );
 
-    console.log("Headers from CSV:", headers); // Debug: Actual headers from the CSV file
-    console.log("Normalized Headers:", normalizedHeaders); // Debug: Normalized headers
-    console.log("Normalized Required Headers:", normalizedRequiredHeaders); // Debug: Expected normalized headers
+        function parseDate(dateStr) {
+          return moment(dateStr, ["DD-MMM-YY", "DD-MMM-YYYY"]).format("YYYY-MM-DD");
+        }
 
-    // Validate if all required headers are present
-    const missingHeaders = normalizedRequiredHeaders.filter(
-      (header) => !normalizedHeaders.includes(header)
-    );
+        console.log("Headers from CSV:", headers);
+        console.log("Normalized Headers:", normalizedHeaders);
 
-    if (missingHeaders.length > 0) {
-      res
-        .status(400)
-        .send(`Missing required headers: ${missingHeaders.join(", ")}`);
-      readableStream.destroy(); // Stop processing further
-    } else {
-      headersValidated.add(true);
-    }
-  })
-  .on("data", (data) => {
-    if (!headersValidated.size) return; // Skip processing if headers are invalid
-  
-    // Use moment.js to parse the date string correctly and extract the month
-    const parsedDate = moment(
-      data["Month, Day, Year of Service Order Status Updated Dtm"], // Updated field name
-      "MMMM D, YYYY"
-    )
-      .utc()
-      .toDate();
-  
-    const month = parsedDate.getMonth(); // Extract the month (0-based index)
-  
-    // Push only relevant fields
-    results.push({
-      rto_split: data["Rto_Split"] || data["Rto Split"], // Handle variations
-      category: data.Category,
-      date: parsedDate, // Save parsed date
-      month: month, // Store the month as a number (0-11)
-      oss_service_order_type: data["Oss Service Order Type"],
-      order_type: data["Order Type"],
-      order_sub_type: data["Order Sub Type"],
-      order_line_oss_service_type: data["Order Line Oss Service Type"],
-    });
-  })
+        let dateHeader = headers.find(
+          (h) =>
+            h.includes("Month, Day, Year of Service Order Status Updated Dtm") ||
+            h.includes("Day, Month, Year of Service Order Status Updated Dtm")
+        );
+
+        if (!dateHeader) {
+          res.status(400).send("Missing required date header in CSV.");
+          readableStream.destroy();
+          return;
+        }
+
+        console.log(`✅ Detected date header: ${dateHeader}`);
+        global.detectedDateHeader = dateHeader;
+        headersValidated.add(true);
+      })
+      .on("data", (data) => {
+        if (!headersValidated.size) return; // Skip processing if headers are invalid
+
+        let dateString = data[global.detectedDateHeader];
+
+        let parsedDate;
+        if (moment(dateString, "D MMMM YYYY", true).isValid()) {
+          parsedDate = moment(dateString, "D MMMM YYYY").utc().toDate();
+        } else if (moment(dateString, "MMMM D, YYYY", true).isValid()) {
+          parsedDate = moment(dateString, "MMMM D, YYYY").utc().toDate();
+        } else if (moment(dateString, "DD-MMM-YY", true).isValid()) {
+          parsedDate = moment(dateString, "DD-MMM-YY")
+            .year(2000 + parseInt(dateString.slice(-2), 10))
+            .utc()
+            .toDate();
+        } else {
+          console.error("❌ Unrecognized date format:", dateString);
+          return;
+        }
+
+        const month = parsedDate.getMonth(); // Extract the month (0-based index)
+        const year = parsedDate.getFullYear();
+        const day = parsedDate.getDate();
+
+        // Push only relevant fields
+        results.push({
+          rto_split: data["Rto_Split"] || data["Rto Split"], // Handle variations
+          category: data.Category,
+          date: parsedDate,
+          year,
+          month,
+          day,
+          oss_service_order_type: data["Oss Service Order Type"],
+          order_type: data["Order Type"],
+          order_sub_type: data["Order Sub Type"],
+          order_line_oss_service_type: data["Order Line Oss Service Type"],
+        });
+      })
       .on("end", async () => {
         try {
           if (!headersValidated.size) return; // Do nothing if headers are invalid
 
           if (replaceData) {
-            // Replace mode: Clear the database and insert new data
-            await Order.deleteMany({});
-            await Order.insertMany(results);
-            res.send("CSV data replaced successfully.");
-          } else {
-            // Incremental mode: Insert only new records
-            const existingDates = (
-              await Order.find({}, { date: 1 }).exec()
-            ).map((order) => order.date.getTime()); // Get all existing dates as timestamps
+            let deleteQuery = {};
+            if (!isNaN(deleteYear)) deleteQuery["date"] = { $gte: new Date(deleteYear, 0, 1), $lt: new Date(deleteYear + 1, 0, 1) };
+            if (!isNaN(deleteMonth)) deleteQuery["date"] = { $gte: new Date(deleteYear, deleteMonth, 1), $lt: new Date(deleteYear, deleteMonth + 1, 1) };
+            if (!isNaN(deleteDay)) deleteQuery["date"] = { $gte: new Date(deleteYear, deleteMonth, deleteDay), $lt: new Date(deleteYear, deleteMonth, deleteDay + 1) };
 
-            const newRecords = results.filter(
-              (record) => !existingDates.includes(record.date.getTime())
-            );
-
-            if (newRecords.length > 0) {
-              await Order.insertMany(newRecords);
-              res.send(
-                `CSV data uploaded successfully. Added ${newRecords.length} new records.`
-              );
-            } else {
-              res.send("No new data to insert.");
+            if (Object.keys(deleteQuery).length > 0) {
+              const deleteResult = await Order.deleteMany(deleteQuery);
+              console.log(`Deleted ${deleteResult.deletedCount} records.`);
             }
+          }
+
+          // Insert only new records
+          const existingDates = (
+            await Order.find({}, { date: 1 }).exec()
+          ).map((order) => order.date.getTime()); // Get all existing dates as timestamps
+
+          const newRecords = results.filter(
+            (record) => !existingDates.includes(record.date.getTime())
+          );
+
+          if (newRecords.length > 0) {
+            await Order.insertMany(newRecords);
+            res.send(`CSV data uploaded successfully. Added ${newRecords.length} new records.`);
+          } else {
+            res.send("No new data to insert.");
           }
         } catch (err) {
           console.error("Error uploading CSV data:", err);
@@ -194,11 +223,12 @@ app.post(
       });
   }
 );
+
 app.post(
   "/upload-disconnection-csv",
   upload.single("disconnection_file"),
   async (req, res) => {
-    const replaceData = req.query.replaceData === "true"; // Check if full replace is requested
+    const replaceData = req.query.replaceData === "true";
 
     if (!req.file) {
       return res.status(400).send("No file uploaded.");
@@ -207,53 +237,81 @@ app.post(
     const results = [];
     const requiredHeaders = [
       "ORDER_LINE_RTO_AREA",
-      "Month, Day, Year of Churn Date (SOSUD)", // Updated
+      "Day, Month, Year of Churn Date (SOSUD)",
       "ACCOUNT_NUM",
-      "Month, Day, Year of DSP", // Updated
+      "Day, Month, Year of DSP",
       "ORDER_LINE_OSS_SERVICE_TYPE",
       "BSS_TARIFF_NAME",
       "Deleted_method",
       "CUSTOMER_TYPE",
     ];
 
+    const parseDate = (dateString) => {
+      let parsedDate;
+      if (moment(dateString, "DD-MMM-YY", true).isValid()) {
+        parsedDate = moment.utc(dateString, "DD-MMM-YY")
+          .year(2000 + parseInt(dateString.slice(-2), 10))
+          .toDate();
+      } else if (moment(dateString, "MMMM D, YYYY", true).isValid()) {
+        parsedDate = moment.utc(dateString, "MMMM D, YYYY").toDate();
+      } else if (moment(dateString, "MMMM D, YY", true).isValid()) {
+        parsedDate = moment.utc(dateString, "MMMM D, YY").toDate();
+      } else if (moment(dateString, "YYYY-MM-DD", true).isValid()) {
+        parsedDate = moment.utc(dateString, "YYYY-MM-DD").toDate();
+      } else if (moment(dateString, "DD-MMM-YYYY", true).isValid()) {
+        parsedDate = moment.utc(dateString, "DD-MMM-YYYY").toDate();
+      } else if (moment(dateString, "DD MMMM YYYY", false).isValid()) {
+        parsedDate = moment.utc(dateString, "DD MMMM YYYY").toDate();
+      } else if (moment(dateString, "D MMMM YYYY", false).isValid()) {
+        parsedDate = moment.utc(dateString, "D MMMM YYYY").toDate();
+      } else {
+        console.warn("Invalid date format:", dateString);
+        return null;
+      }
+      return parsedDate;
+    };
+
     try {
       const csvData = req.file.buffer.toString();
-      const readableStream = Readable.from(csvData); // Use Readable.from
+      const readableStream = Readable.from(csvData);
 
       readableStream
         .pipe(
           csvParser({
-            mapHeaders: ({ header }) => header.trim(),
+            mapHeaders: ({ header }) => {
+              const trimmedHeader = header.trim();
+              console.log(`Detected header: "${trimmedHeader}"`); // Debug log
+              return trimmedHeader;
+            },
           })
         )
         .on("data", (data) => {
           try {
-            // Validate required headers
             const record = {};
+            let hasAllRequiredFields = true;
+
+            // Validate required headers
             requiredHeaders.forEach((header) => {
-              if (!data[header]) {
-                console.warn(`Missing field: ${header} in row, skipping row.`);
-                return;
+              if (!data[header] && header !== "Day, Month, Year of DSP" && header !== "BSS_TARIFF_NAME") {
+                console.warn(`Missing field: ${header} in row`);
+                hasAllRequiredFields = false;
+              } else {
+                record[header] = data[header] || null; // Allow null for BSS_TARIFF_NAME
               }
-              record[header] = data[header];
             });
 
+            if (!hasAllRequiredFields) {
+              return; // Skip row if critical fields (other than DSP and BSS_TARIFF_NAME) are missing
+            }
+
             // Parse dates
-          // Parse dates
-const momentChurnDate = moment.utc(
-  record["Month, Day, Year of Churn Date (SOSUD)"], // Updated
-  ["MMMM D, YYYY", "MMMM D, YY"], // Supported formats
-  true
-);
+            const churnDate = parseDate(record["Day, Month, Year of Churn Date (SOSUD)"]);
+            const activatedDate = record["Day, Month, Year of DSP"]
+              ? parseDate(record["Day, Month, Year of DSP"])
+              : null;
 
-const momentActivatedDate = moment.utc(
-  record["Month, Day, Year of DSP"], // Updated
-  ["MMMM D, YYYY", "MMMM D, YY"], // Supported formats
-  true
-);
-
-            if (!momentChurnDate.isValid() || !momentActivatedDate.isValid()) {
-              console.warn("Invalid date format, skipping row:", record);
+            if (!churnDate) {
+              console.warn("Invalid churn date format, skipping row:", record);
               return;
             }
 
@@ -266,9 +324,9 @@ const momentActivatedDate = moment.utc(
             // Add to results
             results.push({
               order_line_rto_area: record["ORDER_LINE_RTO_AREA"],
-              churn_date: momentChurnDate.toDate(),
+              churn_date: churnDate,
               account_num: record["ACCOUNT_NUM"],
-              activated_date: momentActivatedDate.toDate(),
+              activated_date: activatedDate, // Can be null
               order_line_oss_service_type: record["ORDER_LINE_OSS_SERVICE_TYPE"],
               bss_tariff_name: record["BSS_TARIFF_NAME"],
               deleted_method: standardizedDeletedMethod,
@@ -324,7 +382,7 @@ const momentActivatedDate = moment.utc(
       res.status(500).send("Error processing the uploaded file.");
     }
   }
-);    
+); //now 
 // Aggregation endpoint for counts grouped by category, oss_service_order_type, and month
 app.get("/get-counts", async (req, res) => {
   const { year, month, day } = req.query; // Extract filters from query params
@@ -761,74 +819,6 @@ if (deleted_method) {
 
   return results[0] || {};
 };
-app.get("/get-counts-by-category-and-rto", async (req, res) => {
-  const { year, month, day } = req.query;
-
-  // Initial match stage with fixed category filter
-  const matchStage = {
-    category: "PEO DP BB Up_30K", // Fixed category filter
-  };
-
-  // Add filters based on provided query parameters
-  if (year) {
-    matchStage["$expr"] = { $eq: [{ $year: "$date" }, Number(year)] };
-  }
-
-  const pipeline = [
-    { $match: matchStage }, // Apply category and date filters
-    {
-      $project: {
-        rto_split: 1,
-        category: 1,
-        year: { $year: "$date" },
-        month: { $month: "$date" },
-        day: { $dayOfMonth: "$date" },
-      },
-    },
-  ];
-
-  // Apply the month filter
-  if (month && month !== "all") {
-    pipeline.push({
-      $match: {
-        month: Number(month),
-      },
-    });
-  }
-
-  // Apply the day filter
-  if (day && day !== "all") {
-    pipeline.push({
-      $match: {
-        day: Number(day),
-      },
-    });
-  }
-
-  // Group by rto_split, year, month, day
-  pipeline.push(
-    {
-      $group: {
-        _id: {
-          rto_split: "$rto_split",
-          year: "$year",
-          month: "$month",
-          day: "$day",
-        },
-        count: { $sum: 1 },
-      },
-    },
-    { $sort: { "_id.year": 1, "_id.month": 1, "_id.day": 1 } } // Sort by year, month, day
-  );
-
-  try {
-    const counts = await Order.aggregate(pipeline); // Run aggregation pipeline
-    res.json(counts); // Return the aggregated counts
-  } catch (err) {
-    console.error("Error fetching counts:", err);
-    res.status(500).send("Error fetching counts");
-  }
-});
 // =============================================================
 //  ROUTE TO FETCH THE CATEGORIZED COUNTS WITH ALL FILTERS
 // =============================================================
@@ -924,6 +914,74 @@ app.get("/get-last-update", async (req, res) => {
     res.status(500).json({ error: "Failed to fetch last updated date" });
   }
 });
+app.get("/get-counts-by-category-and-rto", async (req, res) => {
+  const { year, month, day } = req.query;
+
+  // Initial match stage with fixed category filter
+  const matchStage = {
+    category: "PEO DP BB Up_30K", // Fixed category filter
+  };
+
+  // Add filters based on provided query parameters
+  if (year) {
+    matchStage["$expr"] = { $eq: [{ $year: "$date" }, Number(year)] };
+  }
+
+  const pipeline = [
+    { $match: matchStage }, // Apply category and date filters
+    {
+      $project: {
+        rto_split: 1,
+        category: 1,
+        year: { $year: "$date" },
+        month: { $month: "$date" },
+        day: { $dayOfMonth: "$date" },
+      },
+    },
+  ];
+
+  // Apply the month filter
+  if (month && month !== "all") {
+    pipeline.push({
+      $match: {
+        month: Number(month),
+      },
+    });
+  }
+
+  // Apply the day filter
+  if (day && day !== "all") {
+    pipeline.push({
+      $match: {
+        day: Number(day),
+      },
+    });
+  }
+
+  // Group by rto_split, year, month, day
+  pipeline.push(
+    {
+      $group: {
+        _id: {
+          rto_split: "$rto_split",
+          year: "$year",
+          month: "$month",
+          day: "$day",
+        },
+        count: { $sum: 1 },
+      },
+    },
+    { $sort: { "_id.year": 1, "_id.month": 1, "_id.day": 1 } } // Sort by year, month, day
+  );
+
+  try {
+    const counts = await Order.aggregate(pipeline); // Run aggregation pipeline
+    res.json(counts); // Return the aggregated counts
+  } catch (err) {
+    console.error("Error fetching counts:", err);
+    res.status(500).send("Error fetching counts");
+  }
+});
 // Endpoint to get the last updated date from the database
 app.get("/get-last-updated", async (req, res) => {
     try {
@@ -945,7 +1003,7 @@ app.get("/get-last-updated", async (req, res) => {
   });
 
 // CRON job to check for updates every minute (for testing)
-cron.schedule("0 11 * * *", async () => {
+cron.schedule("0 9 * * *", async () => {
   console.log("Running CSV update check...");
 
   try {
@@ -1074,6 +1132,37 @@ app.get("/test-email", async (req, res) => {
   } catch (error) {
     console.error("Error sending test email:", error);
     res.status(500).send("Failed to send test email.");
+  }
+});
+app.delete("/delete-data", async (req, res) => {
+  const { year, month, day } = req.query;
+
+  if (!year) {
+    return res.status(400).send("Year is required.");
+  }
+
+  try {
+    let startDate, endDate;
+
+    if (year && month && day) {
+      // Delete for a specific day
+      startDate = new Date(year, month - 1, day);
+      endDate = new Date(year, month - 1, parseInt(day) + 1);
+    } else if (year && month) {
+      // Delete for a specific month
+      startDate = new Date(year, month - 1, 1);
+      endDate = new Date(year, month, 1); // First day of the next month
+    } else {
+      // Delete for a specific year
+      startDate = new Date(year, 0, 1);
+      endDate = new Date(year, 11, 31, 23, 59, 59);
+    }
+
+    const result = await Order.deleteMany({ date: { $gte: startDate, $lt: endDate } });
+    res.send(`${result.deletedCount} records deleted successfully.`);
+  } catch (error) {
+    console.error("Error deleting data:", error);
+    res.status(500).send("Error deleting data");
   }
 });
 module.exports = { sendEmail };
